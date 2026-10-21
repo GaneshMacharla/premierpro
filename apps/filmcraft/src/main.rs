@@ -121,27 +121,21 @@ fn main() -> eframe::Result {
     // OS hardware video decoders (VideoToolbox on macOS) in front of our own; Settings ▸ Playback ▸
     // Hardware decoding switches them off. Unsupported streams and failures use our decoders.
     register_hardware_decoders();
-    // Lite mode (8 GB machines, no dedicated GPU): decided before any media is opened, see lite.rs.
+    // Lite mode (8 GB machines, no dedicated GPU): chosen from the RAM here, settled in
+    // app_creator once the adapter is known, before any media is opened (lite.rs).
     let lite_env = std::env::var("FILMCRAFT_LITE").ok();
-    let lite_on = lite::decide(launch.lite, lite_env.as_deref(), filmcraft_platform::memory::total_bytes());
-    lite::apply(lite_on);
-    log::info!("lite mode: {}", if lite_on { "on" } else { "off" });
+    let lite_choice = lite::decide(launch.lite, lite_env.as_deref(), filmcraft_platform::memory::total_bytes());
     // Which graphics backends and adapter the window starts with: `--graphics`, else the saved
     // mode, which moves on after starts that died before their window painted (a driver crash),
     // see graphics.rs.
     let backend_override = eframe::wgpu::Backends::from_env();
     let mut graphics = graphics::GraphicsStart::begin(data_root.as_deref(), backend_override.is_some(), launch.graphics);
-    // The GPU export renderer creates its own wgpu instance with every backend; after a start
-    // fell back, that would load the driver that failed. Exports then composite on the CPU.
-    if graphics.mode() == graphics::Mode::Default && !lite_on {
-        register_gpu_frame_renderer();
-    }
     let started = loop {
         let mut options = native_options(launch.control_port.is_some());
         // Before eframe creates the wgpu instance (e.g. no OpenGL on Windows, see graphics.rs).
         graphics::apply(&mut options, graphics.mode(), backend_override);
         let app_created = Arc::new(AtomicBool::new(false));
-        let result = eframe::run_native("FilmCraft", options, app_creator(launch.clone(), graphics.clone(), Arc::clone(&app_created)));
+        let result = eframe::run_native("FilmCraft", options, app_creator(launch.clone(), graphics.clone(), lite_choice, Arc::clone(&app_created)));
         let app_created = app_created.load(Ordering::Relaxed);
         match &result {
             // wgpu reported the failure (no adapter, device creation failed) before the app
@@ -192,11 +186,20 @@ fn native_options(agent: bool) -> eframe::NativeOptions {
 
 /// Creates the app once eframe has its window and graphics device; sets `created` when it runs,
 /// and confirms the graphics mode once two frames have painted.
-fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<AtomicBool>) -> eframe::AppCreator<'static> {
+fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, lite_choice: lite::Choice, created: Arc<AtomicBool>) -> eframe::AppCreator<'static> {
     let Launch { control_port, control_input_only, files, demo, startup_flag, recover, data_dir, graphics: _, lite: _ } = launch;
-    let lite_on = filmcraft_codecs::lite::lite();
     Box::new(move |cc| {
         created.store(true, Ordering::Relaxed);
+        // Settle lite mode before any media is opened: an automatic choice is undone on a dedicated GPU.
+        let device = cc.wgpu_render_state.as_ref().map(|rs| rs.adapter.get_info().device_type);
+        let lite_on = lite_choice.with_adapter(device);
+        lite::apply(lite_on);
+        log::info!("lite mode: {} ({lite_choice:?}, adapter {device:?})", if lite_on { "on" } else { "off" });
+        // The GPU export renderer creates its own wgpu instance with every backend; after a start
+        // fell back, that would load the driver that failed. Exports then composite on the CPU.
+        if graphics.mode() == graphics::Mode::Default && !lite_on {
+            register_gpu_frame_renderer();
+        }
         // A fallback graphics mode says so in the window, with a button back to the default.
         let notice = graphics.degraded().then(|| {
             let start = graphics.clone();
