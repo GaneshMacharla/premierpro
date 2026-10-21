@@ -322,7 +322,12 @@ impl Pool {
     /// The pool of every cache in the process.
     fn global() -> Arc<Pool> {
         static POOL: std::sync::OnceLock<Arc<Pool>> = std::sync::OnceLock::new();
-        POOL.get_or_init(|| Arc::new(Pool::new(MAX_LIVE_DECODERS, IDLE, FRAME_BUDGET).tiered(RECENT, HARD_DECODERS))).clone()
+        POOL.get_or_init(|| {
+            // lite mode (crate::lite): fewer idle decoders and a quarter of the frame budget
+            let (live, hard) = if crate::lite::lite() { (2, 3) } else { (MAX_LIVE_DECODERS, HARD_DECODERS) };
+            Arc::new(Pool::new(live, IDLE, crate::lite::frame_budget()).tiered(RECENT, hard))
+        })
+        .clone()
     }
 
     fn register(&self, c: &Arc<Shared>) {
@@ -448,6 +453,7 @@ fn decode_pool() -> Option<&'static rayon::ThreadPool> {
     static POOL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
     POOL.get_or_init(|| {
         let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        let n = crate::lite::decoder_threads(n);
         rayon::ThreadPoolBuilder::new().num_threads(n).thread_name(|i| format!("decode-{i}")).build().ok()
     })
     .as_ref()

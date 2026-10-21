@@ -21,6 +21,11 @@ Options:
   --graphics <mode>  start with this graphics mode and keep it: default,
                      dx12 (Windows), software (Windows, Linux);
                      `--graphics default` undoes an automatic fallback
+  --lite             low-memory mode for 8 GB machines without a dedicated
+                     GPU: small caches, fewer decoder threads, CPU preview
+                     at 1/4 resolution (also: FILMCRAFT_LITE=1; on by
+                     default with 8 GB of RAM or less)
+  --no-lite          never use lite mode, whatever the RAM
   --version          print the version and exit
   -h, --help         print this help and exit
 ";
@@ -47,6 +52,8 @@ pub struct Launch {
     pub data_dir: Option<std::path::PathBuf>,
     /// `--graphics <mode>`: start with this graphics mode and keep it (see `graphics.rs`).
     pub graphics: Option<crate::graphics::Mode>,
+    /// `--lite` / `--no-lite`; `None` decides from `FILMCRAFT_LITE` and the RAM (`lite.rs`).
+    pub lite: Option<bool>,
 }
 
 /// Parse the arguments after the program name. `env_control_port` is the value of
@@ -70,6 +77,7 @@ pub fn parse(env_control_port: Option<String>, args: impl IntoIterator<Item = Os
         recover: None,
         data_dir: None,
         graphics: None,
+        lite: None,
     };
     let (mut help, mut version) = (false, false);
     let mut args = args.into_iter();
@@ -86,6 +94,8 @@ pub fn parse(env_control_port: Option<String>, args: impl IntoIterator<Item = Os
             "--demo" => (l.demo, l.startup_flag) = (true, true),
             "--control-input-only" => l.control_input_only = true,
             "--empty" => (l.demo, l.startup_flag) = (false, true),
+            "--lite" => l.lite = Some(true),
+            "--no-lite" => l.lite = Some(false),
             "--recover" => l.recover = Some(true),
             "--no-recover" => l.recover = Some(false),
             "--data-dir" => l.data_dir = Some(args.next().map(PathBuf::from).ok_or("--data-dir needs a folder")?),
@@ -179,7 +189,7 @@ mod tests {
         assert_eq!(parse_args(&["--version"]), Ok(Cli::Version));
         assert_eq!(parse_args(&["--version", "--help"]), Ok(Cli::Help));
         assert_eq!(parse_args(&["a.mp4", "--version"]), Ok(Cli::Version));
-        for flag in ["--control", "--demo", "--empty", "--recover", "--no-recover", "--data-dir", "--version", "--help"] {
+        for flag in ["--control", "--demo", "--empty", "--recover", "--no-recover", "--data-dir", "--lite", "--no-lite", "--version", "--help"] {
             assert!(USAGE.contains(flag), "usage lists {flag}");
         }
     }
@@ -234,7 +244,8 @@ mod tests {
                 startup_flag: false,
                 recover: None,
                 data_dir: None,
-                graphics: None
+                graphics: None,
+                lite: None
             }
         );
         let l = launch(&["--control", "9876", "--empty", "--no-recover", "--data-dir", "/tmp/fc", "cut.fcproj", "a.mp4"]);
@@ -246,6 +257,7 @@ mod tests {
         // `--` ends the options; a lone `-` and macOS' process serial number are not options
         assert_eq!(launch(&["--", "--odd name.mov", "-h"]).files, ["--odd name.mov", "-h"]);
         assert_eq!(launch(&["-", "-psn_0_12345"]).files, ["-"]);
+        assert_eq!((launch(&["--lite"]).lite, launch(&["--no-lite"]).lite, launch(&["--no-lite", "--lite"]).lite), (Some(true), Some(false), Some(true)));
     }
 
     /// `std::env::args` panics on an argument that is not Unicode, so such a file name (Latin-1 on

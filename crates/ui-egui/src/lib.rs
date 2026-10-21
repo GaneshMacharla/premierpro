@@ -751,7 +751,11 @@ impl FilmcraftApp {
             }
             i18n::set_current(self.ui.language);
         }
-        self.frames.set_cache_budget(p.memory.frame_cache_mb as usize * (1 << 20));
+        let mut cache_mb = p.memory.frame_cache_mb;
+        if filmcraft_codecs::lite::lite() {
+            cache_mb = cache_mb.min(filmcraft_codecs::lite::LITE_MONITOR_CACHE_MB);
+        }
+        self.frames.set_cache_budget(cache_mb as usize * (1 << 20));
         self.ui.play_after_render = p.timeline.play_after_rendering;
         let hardware_changed = prev.as_ref().is_none_or(|q| q.audio_hardware != p.audio_hardware);
         let pitch_changed = prev.as_ref().is_some_and(|q| q.audio.maintain_pitch_shuttling != p.audio.maintain_pitch_shuttling);

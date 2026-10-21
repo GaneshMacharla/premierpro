@@ -377,7 +377,7 @@ fn recycle_h264_planes() {
 
 /// Worker threads each H.264 decoder uses (frame threading; 1 on wasm).
 pub fn h264_threads() -> usize {
-    filmcraft_h264::default_threads()
+    crate::lite::decoder_threads(filmcraft_h264::default_threads())
 }
 
 pub fn h264_factory(e: &SampleEntry) -> Option<Result<Box<dyn VideoDecoder>>> {
@@ -403,7 +403,7 @@ impl HevcDecoder {
     }
     /// A decoder for Annex B byte-stream samples (start codes, in-band parameter sets: TS).
     pub fn annexb() -> Self {
-        Self { hvcc: Vec::new(), dec: filmcraft_hevc::Decoder::new(), length_size: 0, highest_tid: None }
+        Self { hvcc: Vec::new(), dec: filmcraft_hevc::Decoder::with_threads(crate::lite::default_decoder_threads()), length_size: 0, highest_tid: None }
     }
     fn convert(p: filmcraft_hevc::Picture) -> DecodedFrame {
         use filmcraft_hevc::Plane;
@@ -455,7 +455,7 @@ impl VideoDecoder for HevcDecoder {
     }
     fn reset(&mut self) {
         if self.hvcc.is_empty() {
-            self.dec = filmcraft_hevc::Decoder::new();
+            self.dec = filmcraft_hevc::Decoder::with_threads(crate::lite::default_decoder_threads());
         } else if let Ok(d) = filmcraft_hevc::Decoder::from_hvcc(&self.hvcc) {
             self.dec = d;
         }
@@ -510,7 +510,7 @@ pub(crate) fn primaries_from_code(c: u8) -> Option<filmcraft_color::Primaries> {
 impl Vp9Decoder {
     pub fn new(cfg: Option<&filmcraft_isobmff::VpcConfig>) -> Self {
         Self {
-            dec: filmcraft_vp9::Decoder::new(),
+            dec: filmcraft_vp9::Decoder::with_threads(crate::lite::default_decoder_threads()),
             transfer: cfg.and_then(|c| filmcraft_color::Transfer::from_code(c.transfer_characteristics)),
             primaries: cfg.and_then(|c| primaries_from_code(c.colour_primaries)),
         }
@@ -670,7 +670,7 @@ pub struct Av1Decoder {
 
 impl Av1Decoder {
     pub fn new(config_obus: Vec<u8>) -> Av1Decoder {
-        Av1Decoder { dec: filmcraft_av1::Decoder::new(), config_obus, primed: false }
+        Av1Decoder { dec: filmcraft_av1::Decoder::with_threads(crate::lite::default_decoder_threads()), config_obus, primed: false }
     }
 
     fn convert(p: filmcraft_av1::Picture, pts: i64) -> DecodedFrame {
@@ -731,7 +731,7 @@ impl VideoDecoder for Av1Decoder {
             .collect()
     }
     fn reset(&mut self) {
-        self.dec = filmcraft_av1::Decoder::new();
+        self.dec = filmcraft_av1::Decoder::with_threads(crate::lite::default_decoder_threads());
         self.primed = false;
     }
     fn name(&self) -> &str {

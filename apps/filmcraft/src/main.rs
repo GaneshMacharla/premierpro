@@ -32,6 +32,7 @@ mod control_server;
 mod dev_icon;
 mod file_filters;
 mod graphics;
+mod lite;
 mod logging;
 #[cfg(target_os = "macos")]
 mod native_menu;
@@ -120,6 +121,11 @@ fn main() -> eframe::Result {
     // OS hardware video decoders (VideoToolbox on macOS) in front of our own; Settings ▸ Playback ▸
     // Hardware decoding switches them off. Unsupported streams and failures use our decoders.
     register_hardware_decoders();
+    // Lite mode (8 GB machines, no dedicated GPU): decided before any media is opened, see lite.rs.
+    let lite_env = std::env::var("FILMCRAFT_LITE").ok();
+    let lite_on = lite::decide(launch.lite, lite_env.as_deref(), filmcraft_platform::memory::total_bytes());
+    lite::apply(lite_on);
+    log::info!("lite mode: {}", if lite_on { "on" } else { "off" });
     // Which graphics backends and adapter the window starts with: `--graphics`, else the saved
     // mode, which moves on after starts that died before their window painted (a driver crash),
     // see graphics.rs.
@@ -127,7 +133,7 @@ fn main() -> eframe::Result {
     let mut graphics = graphics::GraphicsStart::begin(data_root.as_deref(), backend_override.is_some(), launch.graphics);
     // The GPU export renderer creates its own wgpu instance with every backend; after a start
     // fell back, that would load the driver that failed. Exports then composite on the CPU.
-    if graphics.mode() == graphics::Mode::Default {
+    if graphics.mode() == graphics::Mode::Default && !lite_on {
         register_gpu_frame_renderer();
     }
     let started = loop {
@@ -187,7 +193,8 @@ fn native_options(agent: bool) -> eframe::NativeOptions {
 /// Creates the app once eframe has its window and graphics device; sets `created` when it runs,
 /// and confirms the graphics mode once two frames have painted.
 fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<AtomicBool>) -> eframe::AppCreator<'static> {
-    let Launch { control_port, control_input_only, files, demo, startup_flag, recover, data_dir, graphics: _ } = launch;
+    let Launch { control_port, control_input_only, files, demo, startup_flag, recover, data_dir, graphics: _, lite: _ } = launch;
+    let lite_on = filmcraft_codecs::lite::lite();
     Box::new(move |cc| {
         created.store(true, Ordering::Relaxed);
         // A fallback graphics mode says so in the window, with a button back to the default.
@@ -252,10 +259,19 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
             app.dialog = None;
         }
         app.integrated_titlebar = cfg!(target_os = "macos");
+        // Lite mode composites on the CPU: GPU textures of an integrated GPU come out of system RAM.
         if let Some(rs) = cc.wgpu_render_state.clone()
             && std::env::var_os("FILMCRAFT_CPU_COMPOSITE").is_none()
+            && !lite_on
         {
             app.set_wgpu(rs);
+        }
+        if lite_on {
+            use filmcraft_ui_egui::state::PlaybackRes;
+            for view in [&mut app.ui.program, &mut app.ui.source] {
+                view.res = PlaybackRes::Quarter;
+                view.paused_res = PlaybackRes::Half;
+            }
         }
         // Keep device selection available even when the default device is unavailable.
         // Settings ▸ Audio Hardware is applied on the first frame (`apply_prefs`).
