@@ -36,12 +36,22 @@ pub fn lite() -> bool {
 
 /// Decoded frames all caches may hold together (see [`crate::gop`]).
 pub fn frame_budget() -> usize {
-    if lite() { LITE_FRAME_BUDGET } else { crate::gop::FRAME_BUDGET }
+    frame_budget_for(lite())
 }
 
 /// The worker threads for a new decoder that would otherwise use `threads`.
 pub fn decoder_threads(threads: usize) -> usize {
-    if lite() { threads.clamp(1, LITE_DECODER_THREADS) } else { threads.max(1) }
+    decoder_threads_for(lite(), threads)
+}
+
+/// [`frame_budget`] with lite mode `on` or off; tests use it without touching the process switch.
+fn frame_budget_for(on: bool) -> usize {
+    if on { LITE_FRAME_BUDGET } else { crate::gop::FRAME_BUDGET }
+}
+
+/// [`decoder_threads`] with lite mode `on` or off.
+fn decoder_threads_for(on: bool, threads: usize) -> usize {
+    if on { threads.clamp(1, LITE_DECODER_THREADS) } else { threads.max(1) }
 }
 
 /// Available cores (at most 16), capped by [`decoder_threads`].
@@ -53,16 +63,15 @@ pub fn default_decoder_threads() -> usize {
 mod tests {
     use super::*;
 
+    /// Tests run in parallel and the decoder pool reads the switch once, so this test never sets it.
     #[test]
     fn lite_caps_threads_and_budget() {
-        set_lite(false);
-        assert_eq!(decoder_threads(16), 16);
-        assert_eq!(decoder_threads(0), 1);
-        assert_eq!(frame_budget(), crate::gop::FRAME_BUDGET);
-        set_lite(true);
-        assert_eq!(decoder_threads(16), LITE_DECODER_THREADS);
-        assert_eq!(decoder_threads(2), 2);
-        assert_eq!(frame_budget(), LITE_FRAME_BUDGET);
-        set_lite(false);
+        assert_eq!(decoder_threads_for(false, 16), 16);
+        assert_eq!(decoder_threads_for(false, 0), 1);
+        assert_eq!(frame_budget_for(false), crate::gop::FRAME_BUDGET);
+        assert_eq!(decoder_threads_for(true, 16), LITE_DECODER_THREADS);
+        assert_eq!(decoder_threads_for(true, 2), 2);
+        assert_eq!(decoder_threads_for(true, 0), 1);
+        assert_eq!(frame_budget_for(true), LITE_FRAME_BUDGET);
     }
 }

@@ -1,8 +1,9 @@
 # Lite mode: 8 GB RAM, no GPU
 
 FilmCraft runs on a machine with 8 GB of RAM and only integrated graphics (or none). Lite mode
-turns on **by itself** when the machine has 8 GB of RAM or less (Windows and Linux). You can also
-switch it on or off yourself:
+turns on **by itself** when the machine has 8 GB of RAM or less (Windows and Linux) and the window
+is not drawn on a dedicated GPU: a discrete graphics card brings its own video memory, so it keeps
+the normal settings. You can also switch it on or off yourself, whatever the GPU:
 
 ```sh
 filmcraft --lite          # always lite
@@ -10,7 +11,8 @@ filmcraft --no-lite       # never lite
 FILMCRAFT_LITE=1 filmcraft
 ```
 
-The log file says `lite mode: on` or `lite mode: off` near the top.
+The log file says `lite mode: on` or `lite mode: off` near the top, with how it was chosen and the
+graphics adapter type.
 
 ## What it changes
 
