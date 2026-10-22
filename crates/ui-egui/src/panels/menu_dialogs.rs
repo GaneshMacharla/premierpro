@@ -341,7 +341,7 @@ fn defaults(app: &mut FilmcraftApp, cmd: &str, id: &str) -> Result<(Value, Value
         }
         "sequence.transcribe" => {
             let tracks: Vec<String> = s.active_sequence().map(|q| (1..=q.audio_tracks.len()).map(|i| format!("A{i}")).collect()).unwrap_or_default();
-            (json!({"language": "auto", "track": "mix", "diarize": true}), json!({"tracks": tracks}))
+            (json!({"language": "auto", "track": "mix", "diarize": true, "background": true, "download": true}), json!({"tracks": tracks}))
         }
         "file.saveAsTemplate" => (json!({"name": s.project.name}), Value::Null),
         "markers.addFlashCue" => (json!({"name": "", "comment": ""}), Value::Null),
@@ -912,6 +912,9 @@ fn run(app: &mut FilmcraftApp, d: &ClipDialogDraft) -> Result<Option<String>, St
                 q.as_object_mut().map(|m| m.remove("language"));
             }
             s.execute(cmd, q).map_err(|e| e.to_string())?;
+            if cmd == "sequence.transcribe" {
+                app.ui.status = tl!("Transcribe Sequence: transcribing in the background (see Progress)").into();
+            }
             Ok(None)
         }
     }

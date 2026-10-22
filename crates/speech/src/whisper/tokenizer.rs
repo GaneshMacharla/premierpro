@@ -39,7 +39,8 @@ fn unicode_to_byte() -> HashMap<char, u8> {
             n += 1;
         }
     }
-    bs.iter().zip(&cs).map(|(&b, &c)| (char::from_u32(c).expect("valid"), b as u8)).collect()
+    // every code is below 512, so `from_u32` never drops one (the test checks all 256 bytes map)
+    bs.iter().zip(&cs).filter_map(|(&b, &c)| Some((char::from_u32(c)?, u8::try_from(b).ok()?))).collect()
 }
 
 impl Tokenizer {
@@ -163,4 +164,17 @@ pub fn group_words(tok: &Tokenizer, ids: &[u32]) -> Vec<(String, std::ops::Range
         groups.push((pre, start..ids.len()));
     }
     groups.into_iter().map(|(b, r)| (String::from_utf8_lossy(&b).trim().to_string(), r)).filter(|(t, _)| !t.is_empty()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn byte_table_covers_every_byte() {
+        let table = super::unicode_to_byte();
+        assert_eq!(table.len(), 256);
+        let mut bytes: Vec<u8> = table.values().copied().collect();
+        bytes.sort_unstable();
+        assert!(bytes.iter().copied().eq(0..=255u8));
+        assert_eq!(table.get(&'A'), Some(&b'A'), "printable bytes map to themselves");
+    }
 }

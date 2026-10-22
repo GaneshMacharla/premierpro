@@ -3617,3 +3617,7 @@
 	Open a sequence to search its graphics	Abre una secuencia para buscar en sus gráficos
 	No text graphics in this sequence. Add text with the Type tool.	Esta secuencia no tiene gráficos con texto. Añade texto con la herramienta Texto.
 	No matching text.	Ningún texto coincide.
+	Transcribe first downloads {name} ({mb} MB, {license}) from Hugging Face.	Transcribir descarga primero {name} ({mb} MB, {license}) desde Hugging Face.
+	Download & Transcribe	Descargar y transcribir
+	Transcribing in the background (see Progress)	Transcribiendo en segundo plano (ver Progreso)
+	Transcribe Sequence: transcribing in the background (see Progress)	Transcribir secuencia: transcribiendo en segundo plano (ver Progreso)

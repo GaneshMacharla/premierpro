@@ -107,8 +107,8 @@ fn targets(s: &Session, p: &Value) -> Vec<ItemId> {
     out
 }
 
-/// Mono 16 kHz audio of a media item (None: no audio).
-fn item_audio(s: &Session, item: ItemId) -> Option<Vec<f32>> {
+/// A media item's audio source and its length in 16 kHz samples (None: no audio).
+fn item_audio(s: &Session, item: ItemId) -> Option<(filmcraft_media::SharedSource, usize)> {
     let dur = match &s.project.item(item)?.kind {
         ItemKind::Media(m) => m.duration(),
         _ => return None,
@@ -117,9 +117,13 @@ fn item_audio(s: &Session, item: ItemId) -> Option<Vec<f32>> {
     if !src.info().has_audio() {
         return None;
     }
-    let sr = filmcraft_speech::SAMPLE_RATE;
-    let len = dur.to_units_floor(sr as i64).max(0) as usize;
-    let buf = src.audio(0, len, sr).ok()?;
+    let len = dur.to_units_floor(filmcraft_speech::SAMPLE_RATE as i64).max(0) as usize;
+    Some((src, len))
+}
+
+/// Mono 16 kHz samples of `src` (None: unreadable).
+fn read_audio(src: &filmcraft_media::SharedSource, len: usize) -> Option<Vec<f32>> {
+    let buf = src.audio(0, len, filmcraft_speech::SAMPLE_RATE).ok()?;
     Some(filmcraft_speech::downmix(&buf.channels))
 }
 
@@ -127,21 +131,173 @@ fn speech_err(e: SpeechError) -> EngineError {
     EngineError::Other(e.to_string())
 }
 
-/// The transcriber to use: the installed one, else the named catalogue model.
-fn transcriber(s: &Session, p: &Value) -> Result<Arc<dyn Transcriber>> {
+/// Where the recogniser comes from: the installed one, or a catalogue model loaded from disk
+/// (seconds for the larger models, so a background job loads it on its own thread), downloaded
+/// first when `fetch` (`download: true`: the user agreed to the size and licence the UI shows).
+enum Recogniser {
+    Ready(Arc<dyn Transcriber>),
+    Load { dir: std::path::PathBuf, model: &'static filmcraft_speech::models::ModelInfo, fetch: bool },
+}
+
+impl Recogniser {
+    fn open(self, progress: &mut dyn FnMut(f32, &str) -> bool) -> std::result::Result<Arc<dyn Transcriber>, SpeechError> {
+        match self {
+            Recogniser::Ready(t) => Ok(t),
+            Recogniser::Load { dir, model, fetch } => {
+                if fetch {
+                    fetch_model(&dir, model, progress)?;
+                }
+                filmcraft_speech::load(&dir, model.id)
+            }
+        }
+    }
+}
+
+/// Download a catalogue model (verified files; nothing is left half-written when stopped).
+#[cfg(feature = "speech-download")]
+fn fetch_model(
+    dir: &std::path::Path,
+    m: &filmcraft_speech::models::ModelInfo,
+    progress: &mut dyn FnMut(f32, &str) -> bool,
+) -> std::result::Result<(), SpeechError> {
+    filmcraft_speech::models::download(dir, m, &mut |got, total, _| {
+        progress(got as f32 / total.max(1) as f32, &format!("Downloading the speech model ({} of {} MB)", got >> 20, total >> 20))
+    })
+}
+
+#[cfg(not(feature = "speech-download"))]
+fn fetch_model(_: &std::path::Path, _: &filmcraft_speech::models::ModelInfo, _: &mut dyn FnMut(f32, &str) -> bool) -> std::result::Result<(), SpeechError> {
+    Err(SpeechError::Unavailable("built without the `speech-download` feature".into()))
+}
+
+/// The speech model the next transcription uses (Settings ▸ Media Analysis & Transcription ▸
+/// Speech model), for the UI to say what a first transcription downloads.
+pub struct ModelStatus {
+    pub name: &'static str,
+    pub size: u64,
+    pub license: &'static str,
+    pub installed: bool,
+    /// The build can download it (`speech-download`).
+    pub downloadable: bool,
+}
+
+/// [`ModelStatus`] of the configured model (None: a host's own recogniser, or an unknown model).
+pub fn model_status(s: &Session) -> Option<ModelStatus> {
+    if s.transcriber.is_some() {
+        return None;
+    }
+    let m = filmcraft_speech::models::find(&s.prefs.media_analysis.whisper_model)?;
+    let installed = models_dir().is_some_and(|d| filmcraft_speech::models::installed(&d, m));
+    Some(ModelStatus { name: m.name, size: m.size(), license: m.license, installed, downloadable: cfg!(feature = "speech-download") })
+}
+
+/// The recogniser to use: the installed one, else the named catalogue model, checked up front so
+/// a missing model fails the command, not a job.
+fn recogniser(s: &Session, p: &Value) -> Result<Recogniser> {
     if let Some(t) = &s.transcriber {
-        return Ok(t.clone());
+        return Ok(Recogniser::Ready(t.clone()));
     }
     // Settings ▸ Media Analysis & Transcription ▸ Speech model
     let model = str_p(p, "model").unwrap_or(&s.prefs.media_analysis.whisper_model);
-    if filmcraft_speech::models::find(model).is_none() {
+    let Some(m) = filmcraft_speech::models::find(model) else {
         return Err(speech_err(SpeechError::UnknownModel(model.into())));
-    }
+    };
     if !filmcraft_speech::available() {
         return Err(EngineError::Other(NO_SPEECH.into()));
     }
     let dir = models_dir().ok_or_else(|| EngineError::Other("no data directory for speech models".into()))?;
-    filmcraft_speech::load(&dir, model).map_err(speech_err)
+    let fetch = !filmcraft_speech::models::installed(&dir, m);
+    if fetch && !bool_p(p, "download").unwrap_or(false) {
+        return Err(speech_err(SpeechError::NotInstalled(model.into())));
+    }
+    if fetch && !cfg!(feature = "speech-download") {
+        return Err(speech_err(SpeechError::Unavailable("built without the `speech-download` feature".into())));
+    }
+    Ok(Recogniser::Load { dir, model: m, fetch })
+}
+
+/// One media item to transcribe.
+struct Work {
+    item: ItemId,
+    name: String,
+    src: filmcraft_media::SharedSource,
+    len: usize,
+}
+
+/// What a transcription run produced: transcripts, and items without readable audio.
+type Transcribed = (Vec<(ItemId, Transcript)>, Vec<u64>);
+
+/// Transcribe every item; `progress(item index, fraction of that item, status)` returns false to stop.
+fn transcribe_all(
+    rec: Recogniser,
+    work: &[Work],
+    opts: &Options,
+    progress: &mut dyn FnMut(usize, f32, &str) -> bool,
+) -> std::result::Result<Transcribed, String> {
+    if !progress(0, 0.0, "Loading the speech model") {
+        return Err(STOPPED.into());
+    }
+    let t = match rec.open(&mut |f, msg| progress(0, f, msg)) {
+        Ok(t) => t,
+        Err(SpeechError::Cancelled) => return Err(STOPPED.into()),
+        Err(e) => return Err(e.to_string()),
+    };
+    let mut done = Vec::new();
+    let mut skipped = Vec::new();
+    for (k, w) in work.iter().enumerate() {
+        if !progress(k, 0.0, &format!("{}: reading audio", w.name)) {
+            return Err(STOPPED.into());
+        }
+        let Some(audio) = read_audio(&w.src, w.len) else {
+            skipped.push(w.item.0);
+            continue;
+        };
+        let mut stopped = false;
+        let r = t.transcribe(&audio, opts, &mut |f, msg| {
+            stopped = !progress(k, f, &format!("{}: {msg}", w.name));
+            !stopped
+        });
+        if stopped {
+            return Err(STOPPED.into());
+        }
+        let mut tr = r.map_err(|e| e.to_string())?;
+        tr.normalize();
+        done.push((w.item, tr));
+    }
+    if done.is_empty() {
+        return Err("none of the clips has audio to transcribe".into());
+    }
+    Ok((done, skipped))
+}
+
+/// The error of a cancelled transcription job.
+const STOPPED: &str = "stopped";
+
+fn report_json(done: &[(ItemId, Transcript)]) -> Vec<Value> {
+    done.iter().map(|(i, t)| json!({"item": i.0, "words": t.words.len(), "speakers": t.speakers.len(), "language": t.language, "source": t.source})).collect()
+}
+
+/// Store transcripts (one undo step); items deleted in the meantime are left out.
+fn store(s: &mut Session, done: Vec<(ItemId, Transcript)>) -> Result<()> {
+    s.edit("Transcribe", move |pr, _| {
+        for (i, t) in done {
+            if pr.item(i).is_some() {
+                pr.transcripts.insert(i, Arc::new(t));
+            }
+        }
+        Ok(())
+    })
+}
+
+/// A background `transcript.generate`; [`poll`] stores its transcripts when it finishes.
+pub struct PendingTranscripts {
+    pub job: u64,
+    pub items: Vec<ItemId>,
+    results: Arc<std::sync::Mutex<Option<Vec<(ItemId, Transcript)>>>>,
+}
+
+fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 fn generate(s: &mut Session, p: &Value) -> Result<Value> {
@@ -149,7 +305,13 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     if items.is_empty() {
         return Err(bad("transcript.generate", "nothing to transcribe (pass `items`, select clips, or open a sequence with audio)"));
     }
-    let t = transcriber(s, p)?;
+    // Whisper takes minutes on a laptop CPU: the desktop UI asks for a job so the window stays
+    // responsive. Agents and the CLI wait for the result; the web has no threads.
+    let background = bool_p(p, "background").unwrap_or(false) && !cfg!(target_arch = "wasm32");
+    if background && let Some(j) = s.transcript_jobs.iter().find(|j| j.items.iter().any(|i| items.contains(i))) {
+        return Err(EngineError::Other(format!("these clips are already being transcribed (job {})", j.job)));
+    }
+    let rec = recogniser(s, p)?;
     // Settings ▸ Media Analysis & Transcription: language (or auto-detect) and speaker labelling
     let ma = &s.prefs.media_analysis;
     let default_language = if ma.language_auto_detect { None } else { Some(ma.default_language.clone()) };
@@ -161,31 +323,84 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
         diarize: bool_p(p, "diarize").unwrap_or(ma.speaker_labeling != "off"),
         max_speakers: u64_p(p, "maxSpeakers").map(|n| n.clamp(1, 32) as usize).unwrap_or(Options::default().max_speakers),
     };
-    let mut done: Vec<(ItemId, Transcript)> = Vec::new();
+    let mut work = Vec::new();
     let mut skipped = Vec::new();
     for item in items {
-        let Some(audio) = item_audio(s, item) else {
-            skipped.push(item.0);
-            continue;
-        };
-        let mut tr = t.transcribe(&audio, &opts, &mut |_, _| true).map_err(speech_err)?;
-        tr.normalize();
-        done.push((item, tr));
+        match item_audio(s, item) {
+            Some((src, len)) => {
+                let name = s.project.item(item).map(|i| i.name.clone()).unwrap_or_default();
+                work.push(Work { item, name, src, len });
+            }
+            None => skipped.push(item.0),
+        }
     }
-    if done.is_empty() {
+    if work.is_empty() {
         return Err(EngineError::Other("none of the clips has audio to transcribe".into()));
     }
-    let report: Vec<Value> = done
-        .iter()
-        .map(|(i, t)| json!({"item": i.0, "words": t.words.len(), "speakers": t.speakers.len(), "language": t.language, "source": t.source}))
-        .collect();
-    s.edit("Transcribe", move |pr, _| {
-        for (i, t) in done {
-            pr.transcripts.insert(i, Arc::new(t));
+    if !background {
+        let (done, more) = transcribe_all(rec, &work, &opts, &mut |_, _, _| true).map_err(EngineError::Other)?;
+        skipped.extend(more);
+        let report = report_json(&done);
+        store(s, done)?;
+        return Ok(json!({"items": report, "skipped": skipped}));
+    }
+    let id = s.jobs.iter().map(|j| j.id).max().unwrap_or(0) + 1;
+    let n = work.len();
+    let label = format!("Transcribe ({n} clip{})", if n == 1 { "" } else { "s" });
+    let job = crate::Job { id, label, progress: Default::default(), result: Default::default() };
+    // per mille of each clip, so the bar moves within long clips
+    job.progress.total.store(n as u64 * 1000, std::sync::atomic::Ordering::Relaxed);
+    let results: Arc<std::sync::Mutex<Option<Vec<(ItemId, Transcript)>>>> = Arc::default();
+    let pending = PendingTranscripts { job: id, items: work.iter().map(|w| w.item).collect(), results: results.clone() };
+    let (prog, res) = (job.progress.clone(), job.result.clone());
+    let run = move || {
+        use std::sync::atomic::Ordering;
+        let t0 = web_time::Instant::now();
+        let r = transcribe_all(rec, &work, &opts, &mut |k, f, msg| {
+            let at = k as u64 * 1000 + (f.clamp(0.0, 1.0) * 1000.0) as u64;
+            prog.done.store(at, Ordering::Relaxed);
+            *lock(&prog.status) = msg.to_string();
+            !prog.cancel.load(Ordering::Relaxed)
+        });
+        let secs = t0.elapsed().as_secs_f64();
+        *lock(&prog.status) = match &r {
+            Ok((done, _)) => format!("Transcribed {} word(s) ({secs:.0}s)", done.iter().map(|(_, t)| t.words.len()).sum::<usize>()),
+            Err(e) if e == STOPPED => "Stopped: nothing was changed".into(),
+            Err(e) => e.clone(),
+        };
+        let report = r.map(|(done, _)| {
+            *lock(&results) = Some(done);
+            filmcraft_export::Report { path: String::new(), frames: 0, seconds: secs, bytes: 0, render_fps: 0.0, extra_files: Vec::new() }
+        });
+        *lock(&res) = Some(report);
+        prog.finished.store(true, Ordering::Relaxed);
+    };
+    let run = crate::export_tools::guard_job(job.progress.clone(), job.result.clone(), run);
+    std::thread::Builder::new().name("filmcraft-transcribe".into()).spawn(run).map_err(|e| EngineError::Other(e.to_string()))?;
+    s.jobs.push(job);
+    s.transcript_jobs.push(pending);
+    Ok(json!({"job": id, "items": n, "skipped": skipped}))
+}
+
+/// Store the transcripts of finished background jobs (one undo step each) and drop finished or
+/// cancelled ones. Called once per UI frame from [`Session::poll_persistence`].
+pub fn poll(s: &mut Session) {
+    use std::sync::atomic::Ordering;
+    let mut i = 0;
+    while i < s.transcript_jobs.len() {
+        let job = s.jobs.iter().find(|j| j.id == s.transcript_jobs[i].job);
+        let finished = job.is_none_or(|j| j.progress.finished.load(Ordering::Relaxed));
+        let cancelled = job.is_some_and(|j| j.progress.cancel.load(Ordering::Relaxed));
+        if !finished {
+            i += 1;
+            continue;
         }
-        Ok(())
-    })?;
-    Ok(json!({"items": report, "skipped": skipped}))
+        let pj = s.transcript_jobs.remove(i);
+        let Some(done) = lock(&pj.results).take().filter(|_| !cancelled) else { continue };
+        if let Err(e) = store(s, done) {
+            s.error_toast("transcript.generate", format!("Transcribe: {e}"));
+        }
+    }
 }
 
 fn set(s: &mut Session, p: &Value) -> Result<Value> {
@@ -439,7 +654,7 @@ pub fn commands() -> Vec<CommandSpec> {
             "transcript.generate",
             "Transcribe…",
             &["Sequence", "Transcript"],
-            r#"{"items":[id]?,"model":"whisper-base"?,"language":"en|auto"?,"diarize":bool?,"maxSpeakers":n?}"#,
+            r#"{"items":[id]?,"model":"whisper-base"?,"language":"en|auto"?,"diarize":bool?,"maxSpeakers":n?,"background":bool?,"download":bool?}"#,
             can_transcribe,
             generate,
             true,

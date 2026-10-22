@@ -305,6 +305,10 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 
 - **Missing:** the `whisper` feature is off by default and in releases, so Transcribe Sequence,
   text-based editing and auto captions need a source build.
+- **Have (FilmCraft Lite):** the Lite Windows build (`.github/workflows/lite-windows.yml`) turns
+  `whisper` on; transcription runs as a cancellable background job and downloads the model on
+  first use after the Text panel says its size and licence (`background`, `download` in
+  `transcript.generate`).
 - **Estimate:** 5–10 h (model download UX, licence check).
 
 ## G20. The web app shell

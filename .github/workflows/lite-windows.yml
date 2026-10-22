@@ -26,6 +26,8 @@ jobs:
       DIST: ${{ github.workspace }}\dist\release
       # Japanese text in the UI and titles, as the official release builds have it.
       CRAFT_FONTS_DIR: ${{ github.workspace }}\craft-fonts
+      # Speech-to-text (Transcribe, text-based editing, auto captions); the model downloads on first use.
+      FILMCRAFT_FEATURES: filmcraft/whisper,filmcraft-cli/whisper
     steps:
       - uses: actions/checkout@v4
 
@@ -74,6 +76,8 @@ jobs:
           No install rights? Use the portable ``.zip``: unzip it and run ``filmcraft.exe``.
 
           **"Windows protected your PC":** this build is not code-signed. Click **More info**, then **Run anyway**.
+
+          Speech-to-text is included: the first Transcribe downloads the Whisper base speech model (about 290 MB).
 
           Lite mode turns on by itself on PCs with 8 GB of RAM or less and no dedicated graphics card; see docs/lite-mode.md.
           "@

@@ -530,19 +530,27 @@ fn transcript(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let c = rect.center();
         icons::paint(ui.painter(), Rect::from_center_size(c - vec2(0.0, 70.0), vec2(40.0, 40.0)), Icon::Captions, t.text_dim);
         ui.painter().text(c - vec2(0.0, 30.0), Align2::CENTER_CENTER, tl!("Transcribe sequence"), Tokens::semibold(16.0), t.text);
-        let note = if filmcraft_speech_available(app) {
-            tl!("Speech-to-text turns the dialogue into editable text.")
+        // The first transcription downloads the speech model: say what, how big and under which
+        // licence before the click that starts it.
+        let model = filmcraft_engine::transcript::model_status(&app.session).filter(|m| !m.installed);
+        let note = if !filmcraft_speech_available(app) {
+            tl!("This build has no speech-to-text; import a transcript with transcript.set.").to_string()
+        } else if let Some(m) = &model {
+            tlf!("Transcribe first downloads {name} ({mb} MB, {license}) from Hugging Face.", name = m.name, mb = m.size >> 20, license = m.license)
         } else {
-            tl!("This build has no speech-to-text; import a transcript with transcript.set.")
+            tl!("Speech-to-text turns the dialogue into editable text.").to_string()
         };
         ui.painter().text(c - vec2(0.0, 8.0), Align2::CENTER_CENTER, note, Tokens::ui(12.0), t.text_dim);
         let r = Rect::from_center_size(c + vec2(0.0, 26.0), vec2(200.0, 26.0));
         let resp = ui.interact(r, egui::Id::new("text.transcript.generate"), Sense::click());
         ui.painter().rect_filled(r, 13.0, if resp.hovered() { t.accent_hover } else { t.accent });
-        ui.painter().text(r.center(), Align2::CENTER_CENTER, tl!("Transcribe"), Tokens::semibold(12.0), Color32::WHITE);
-        app.auto.add("text.transcript.generate", r, "Transcribe");
+        let label = if model.is_some() { tl!("Download & Transcribe") } else { tl!("Transcribe") };
+        ui.painter().text(r.center(), Align2::CENTER_CENTER, label, Tokens::semibold(12.0), Color32::WHITE);
+        app.auto.add("text.transcript.generate", r, label);
         if resp.clicked() {
-            actions.push(("transcript.generate".into(), json!({})));
+            // a job (Progress panel, Cancel): Whisper takes minutes and would freeze the window
+            actions.push(("transcript.generate".into(), json!({"background": true, "download": model.is_some()})));
+            app.ui.status = tl!("Transcribing in the background (see Progress)").into();
         }
         run(app, ui, actions);
         return;

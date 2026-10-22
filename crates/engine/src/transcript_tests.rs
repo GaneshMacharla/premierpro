@@ -179,3 +179,92 @@ fn generate_without_a_transcriber() {
     let r = s.execute("transcript.generate", json!({})).unwrap();
     assert!(r["items"].as_array().unwrap().len() >= 2, "{r}");
 }
+
+/// Run `poll` until the background transcription jobs are gone (bounded: a hung job fails the test).
+fn wait_for_jobs(s: &mut Session) {
+    for _ in 0..1000 {
+        s.poll_persistence();
+        if s.transcript_jobs.is_empty() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("transcription job did not finish");
+}
+
+/// Reports progress until it is told to stop (cancel), or for at most 10 s.
+struct UntilStopped;
+
+impl filmcraft_speech::Transcriber for UntilStopped {
+    fn id(&self) -> String {
+        "until-stopped".into()
+    }
+    fn transcribe(
+        &self,
+        _: &[f32],
+        _: &filmcraft_speech::Options,
+        progress: filmcraft_speech::ProgressFn,
+    ) -> Result<Transcript, filmcraft_speech::SpeechError> {
+        for _ in 0..1000 {
+            if !progress(0.5, "decoding") {
+                return Ok(Transcript::default());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        Ok(Transcript::default())
+    }
+}
+
+/// A recogniser with a bug.
+struct Panics;
+
+impl filmcraft_speech::Transcriber for Panics {
+    fn id(&self) -> String {
+        "panics".into()
+    }
+    fn transcribe(&self, _: &[f32], _: &filmcraft_speech::Options, _: filmcraft_speech::ProgressFn) -> Result<Transcript, filmcraft_speech::SpeechError> {
+        panic!("recogniser bug")
+    }
+}
+
+fn job_json(s: &Session, id: &serde_json::Value) -> serde_json::Value {
+    s.jobs.iter().find(|j| json!(j.id) == *id).unwrap().to_json()
+}
+
+#[test]
+fn background_generate_stores_one_undo_step_when_done() {
+    let (mut s, item, _) = session();
+    let r = s.execute("transcript.generate", json!({"items": [item.0], "background": true})).unwrap();
+    assert_eq!(r["items"], 1, "{r}");
+    assert!(r["job"].is_u64(), "{r}");
+    wait_for_jobs(&mut s);
+    assert_eq!(s.project.transcripts[&item].words.len(), 6);
+    assert!(job_json(&s, &r["job"])["status"].as_str().unwrap().starts_with("Transcribed 6 word(s)"));
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(s.project.transcripts.is_empty(), "one undo step");
+}
+
+#[test]
+fn background_generate_can_be_cancelled_and_refuses_a_second_job() {
+    let (mut s, item, _) = session();
+    s.transcriber = Some(Arc::new(UntilStopped));
+    let r = s.execute("transcript.generate", json!({"items": [item.0], "background": true})).unwrap();
+    let e = s.execute("transcript.generate", json!({"items": [item.0], "background": true})).unwrap_err();
+    assert!(e.to_string().contains("already being transcribed"), "{e}");
+    let job = s.jobs.iter().find(|j| json!(j.id) == r["job"]).unwrap();
+    job.progress.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    wait_for_jobs(&mut s);
+    assert!(s.project.transcripts.is_empty(), "cancelled: nothing stored");
+    assert_eq!(job_json(&s, &r["job"])["status"], "Stopped: nothing was changed");
+}
+
+#[test]
+fn background_generate_survives_a_recogniser_panic() {
+    let (mut s, item, _) = session();
+    s.transcriber = Some(Arc::new(Panics));
+    let r = s.execute("transcript.generate", json!({"items": [item.0], "background": true})).unwrap();
+    wait_for_jobs(&mut s);
+    assert!(s.project.transcripts.is_empty());
+    let j = job_json(&s, &r["job"]);
+    assert!(j["result"]["error"].as_str().unwrap().contains("internal error"), "{j}");
+}

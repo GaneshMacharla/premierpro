@@ -82,6 +82,13 @@ Apple-silicon laptop CPU).
 
 ## Limits
 
-- Transcription runs synchronously inside the command (no background job or progress bar yet).
+- `transcript.generate` waits for the result unless `background: true`, as the desktop UI sends it
+  (the Text panel's Transcribe button and Sequence ▸ Transcribe Sequence): then the model loads,
+  the audio decodes and Whisper runs on a worker thread, as a job in the Progress panel that can
+  be cancelled, and the transcripts are stored as one undo step when it finishes. The web build
+  always waits (no threads).
+- `download: true` downloads a missing catalogue model first, inside the same job. The Text panel
+  sends it only from its **Download & Transcribe** button, which says the model's name, size and
+  licence; without it a missing model fails the command as before.
 - Track items that refer to a subclip are looked up by the subclip's id, so a transcript made for
   the parent media is not shown through subclip clips yet.
