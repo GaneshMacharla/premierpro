@@ -57,3 +57,11 @@ The app is then `target/release/filmcraft` (`filmcraft.exe` on Windows).
 - Use proxies for 4K or HEVC footage (Clip ▸ Proxy ▸ Create Proxies…, preset *H.264 1/4*).
 - Keep Settings ▸ Playback ▸ *Draft decoding* on.
 - Close other heavy apps (browsers) while exporting.
+
+## Download (Windows)
+
+[Releases](https://github.com/GaneshMacharla/premierpro/releases) has the installer
+(`filmcraft-<version>-windows-x64.msi`) and a portable `.zip`, built by
+`.github/workflows/lite-windows.yml` on every `lite-v*` tag. FilmCraft Lite installs next to official
+FilmCraft (its own name, folder and Start menu entry) rather than replacing it. The builds are not
+code-signed: at "Windows protected your PC", click **More info**, then **Run anyway**.
