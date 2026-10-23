@@ -29,7 +29,7 @@ jobs:
       # Speech-to-text (Transcribe, text-based editing, auto captions); the model downloads on first use.
       FILMCRAFT_FEATURES: filmcraft/whisper,filmcraft-cli/whisper
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: craft-fonts
         shell: pwsh
@@ -57,7 +57,7 @@ jobs:
         shell: pwsh
         run: pwsh packaging/windows/package.ps1 -Arch x64
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: filmcraft-lite-windows-x64
           path: dist/release/*
